@@ -93,56 +93,94 @@
   function filterAltitude(rawAlt,altAcc,t){
     if(!Number.isFinite(rawAlt))return altitudeState?altitudeState.p:null;
     if(Number.isFinite(altAcc)&&altAcc>40)return altitudeState?altitudeState.p:null;
-    if(lastGoodRawAlt){const dt=Math.max((t-lastGoodRawAlt.t)/1000,.5),delta=Math.abs(rawAlt-lastGoodRawAlt.alt);if(delta>12&&delta/dt>2.5)return altitudeState?altitudeState.p:null}
+    if(lastGoodRawAlt){
+      const dt=Math.max((t-lastGoodRawAlt.t)/1000,.5),delta=Math.abs(rawAlt-lastGoodRawAlt.alt);
+      if(delta>12&&delta/dt>2.5)return altitudeState?altitudeState.p:null;
+    }
     lastGoodRawAlt={alt:rawAlt,t};
     const r=Math.max(25,Math.pow(Number.isFinite(altAcc)?altAcc:12,2));
     if(!altitudeState){altitudeState={p:rawAlt,var:r,t};return rawAlt}
-    const dt=clamp((t-altitudeState.t)/1000,.2,10);altitudeState.var+=2.25*dt*dt;
-    const gain=altitudeState.var/(altitudeState.var+r);altitudeState.p+=gain*(rawAlt-altitudeState.p);altitudeState.var=Math.max((1-gain)*altitudeState.var,1);altitudeState.t=t;return altitudeState.p;
+    const dt=clamp((t-altitudeState.t)/1000,.2,10);
+    altitudeState.var+=2.25*dt*dt;
+    const gain=altitudeState.var/(altitudeState.var+r);
+    altitudeState.p+=gain*(rawAlt-altitudeState.p);
+    altitudeState.var=Math.max((1-gain)*altitudeState.var,1);
+    altitudeState.t=t;
+    return altitudeState.p;
   }
 
   function initializeGpsFilter(){
     const lat=median(warmup.map(p=>p.lat)),lng=median(warmup.map(p=>p.lng)),acc=median(warmup.map(p=>p.acc));
     const latest=warmup.at(-1),alt=median(warmup.map(p=>p.alt)),altAcc=median(warmup.map(p=>p.altAcc));
-    origin={lat,lng};const posVar=Math.max(16,acc*acc);kx=newKalman(0,posVar);ky=newKalman(0,posVar);filterT=latest.t;
-    const filteredAlt=filterAltitude(alt,altAcc,latest.t);const p={lat,lng,alt:filteredAlt,acc,t:latest.t};warmup=[];return p;
+    origin={lat,lng};
+    const posVar=Math.max(16,acc*acc);
+    kx=newKalman(0,posVar);ky=newKalman(0,posVar);filterT=latest.t;
+    const filteredAlt=filterAltitude(alt,altAcc,latest.t);
+    const p={lat,lng,alt:filteredAlt,acc,t:latest.t};
+    warmup=[];
+    return p;
   }
 
   function filterGps(raw){
     if(!origin)return null;
     const prev=points.at(-1),dt=clamp((raw.t-filterT)/1000,.2,10);
-    if(prev){const rawDistance=hav(prev,raw),allowance=Math.max(GPS.hardJumpMeters,raw.acc*2+(prev.acc||0));if(rawDistance>allowance&&rawDistance/dt>GPS.maxRunSpeed){rejectedFixes++;return null}}
+    if(prev){
+      const rawDistance=hav(prev,raw),allowance=Math.max(GPS.hardJumpMeters,raw.acc*2+(prev.acc||0));
+      if(rawDistance>allowance&&rawDistance/dt>GPS.maxRunSpeed){rejectedFixes++;return null}
+    }
     const local=localMeters(raw.lat,raw.lng),r=Math.max(9,raw.acc*raw.acc),accelSigma=Number.isFinite(raw.speed)&&raw.speed>2.5?3:2;
     kalmanStep(kx,local.x,dt,r,accelSigma);kalmanStep(ky,local.y,dt,r,accelSigma);filterT=raw.t;
-    const ll=localLatLng(kx.p,ky.p);return{lat:ll.lat,lng:ll.lng,alt:filterAltitude(raw.alt,raw.altAcc,raw.t),acc:raw.acc,t:raw.t};
+    const ll=localLatLng(kx.p,ky.p);
+    return{lat:ll.lat,lng:ll.lng,alt:filterAltitude(raw.alt,raw.altAcc,raw.t),acc:raw.acc,t:raw.t};
   }
 
   function updateCurrentMarker(p,follow=true){
-    if(currentMarker)currentMarker.setLatLng([p.lat,p.lng]);else currentMarker=L.circleMarker([p.lat,p.lng],{radius:8,color:'#fff',fillColor:'#16a34a',fillOpacity:1,weight:3}).addTo(map);
+    if(currentMarker)currentMarker.setLatLng([p.lat,p.lng]);
+    else currentMarker=L.circleMarker([p.lat,p.lng],{radius:8,color:'#fff',fillColor:'#16a34a',fillOpacity:1,weight:3}).addTo(map);
     if(follow){if(points.length===0)map.setView([p.lat,p.lng],18);else map.panTo([p.lat,p.lng],{animate:true,duration:.25,easeLinearity:.25})}
-    altitudeEl.textContent=Number.isFinite(p.alt)?Math.round(p.alt):'—';accuracyEl.textContent=Number.isFinite(p.acc)?Math.round(p.acc):'—';
+    altitudeEl.textContent=Number.isFinite(p.alt)?Math.round(p.alt):'—';
+    accuracyEl.textContent=Number.isFinite(p.acc)?Math.round(p.acc):'—';
   }
 
   function appendPoint(p,follow=true){
-    const prev=points.at(-1),seg=prev?hav(prev,p):0;totalMeters+=seg;p.dist=totalMeters;points.push(p);lastRenderedT=p.t;
-    if(Number.isFinite(p.alt)){if(ascentBaseAlt===null)ascentBaseAlt=p.alt;if(p.alt<ascentBaseAlt)ascentBaseAlt=p.alt;else if(p.alt-ascentBaseAlt>=3){totalAscent+=p.alt-ascentBaseAlt;ascentBaseAlt=p.alt}}
-    line.addLatLng([p.lat,p.lng]);if(!startMarker)startMarker=L.circleMarker([p.lat,p.lng],{radius:6,color:'#111827',fillColor:'#fff',fillOpacity:1,weight:3}).addTo(map);
-    updateCurrentMarker(p,follow);requestAnimationFrame(updateMetrics);
+    const prev=points.at(-1),seg=prev?hav(prev,p):0;
+    totalMeters+=seg;p.dist=totalMeters;points.push(p);lastRenderedT=p.t;
+
+    if(Number.isFinite(p.alt)){
+      if(ascentBaseAlt===null)ascentBaseAlt=p.alt;
+      if(p.alt<ascentBaseAlt)ascentBaseAlt=p.alt;
+      else if(p.alt-ascentBaseAlt>=3){totalAscent+=p.alt-ascentBaseAlt;ascentBaseAlt=p.alt}
+    }
+
+    line.addLatLng([p.lat,p.lng]);
+    if(!startMarker)startMarker=L.circleMarker([p.lat,p.lng],{radius:6,color:'#111827',fillColor:'#fff',fillOpacity:1,weight:3}).addTo(map);
+    updateCurrentMarker(p,follow);
+    requestAnimationFrame(updateMetrics);
   }
 
   function handleGpsPosition(pos){
-    const c=pos.coords,acc=Number.isFinite(c.accuracy)?c.accuracy:999;accuracyEl.textContent=Math.round(acc);
+    const c=pos.coords,acc=Number.isFinite(c.accuracy)?c.accuracy:999;
+    accuracyEl.textContent=Math.round(acc);
     const raw={lat:c.latitude,lng:c.longitude,alt:c.altitude,altAcc:c.altitudeAccuracy,acc,t:pos.timestamp,speed:c.speed};
+
     if(!origin){
       if(acc>GPS.startMaxAccuracy){setStatus('GPSを安定させています',`開始位置の精度が約 ${Math.round(acc)} m。35 m以内になるまで待っています。`);return}
-      warmup.push(raw);if(warmup.length>GPS.warmupCount)warmup.shift();setStatus('GPSを安定させています',`良好な測位を収集中 ${warmup.length}/${GPS.warmupCount}`);
-      if(warmup.length<GPS.warmupCount)return;const first=initializeGpsFilter();appendPoint(first,true);setStatus('補正してリアルタイム記録中','開始位置を安定化しました。以降はGPSノイズを除去して描画します。');return;
+      warmup.push(raw);if(warmup.length>GPS.warmupCount)warmup.shift();
+      setStatus('GPSを安定させています',`良好な測位を収集中 ${warmup.length}/${GPS.warmupCount}`);
+      if(warmup.length<GPS.warmupCount)return;
+      const first=initializeGpsFilter();appendPoint(first,true);
+      setStatus('補正してリアルタイム記録中','開始位置を安定化しました。以降はGPSノイズを除去して描画します。');
+      return;
     }
+
     if(acc>GPS.maxAccuracy){rejectedFixes++;setStatus('精度の悪い測位を除外',`現在の精度は約 ${Math.round(acc)} m。55 mを超えたため走行線には使いません。`);return}
-    const filtered=filterGps(raw);if(!filtered){setStatus('GPSジャンプを除外',`不自然な瞬間移動を検出して無視しました。除外 ${rejectedFixes} 回。`);return}
+    const filtered=filterGps(raw);
+    if(!filtered){setStatus('GPSジャンプを除外',`不自然な瞬間移動を検出して無視しました。除外 ${rejectedFixes} 回。`);return}
+
     updateCurrentMarker(filtered,true);
     const prev=points.at(-1),move=prev?hav(prev,filtered):Infinity,deadband=clamp(acc*.08,1.2,3),age=lastRenderedT===null?Infinity:filtered.t-lastRenderedT;
-    if(!prev||move>=deadband||(age>5000&&move>=.5))appendPoint(filtered,false);else requestAnimationFrame(updateMetrics);
+    if(!prev||move>=deadband||(age>5000&&move>=.5))appendPoint(filtered,false);
+    else requestAnimationFrame(updateMetrics);
     setStatus('補正してリアルタイム記録中',`${points.length} 地点を描画。微小ブレと異常値を自動除外しています${rejectedFixes?`（除外 ${rejectedFixes} 回）`:''}。`);
   }
 
