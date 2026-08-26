@@ -1,0 +1,180 @@
+<!doctype html>
+<html lang="ja">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+  <meta name="theme-color" content="#111827">
+  <title>Run Trace</title>
+  <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" crossorigin="">
+  <style>
+    :root{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;color:#111827;background:#f4f5f7}*{box-sizing:border-box}body{margin:0}.app{max-width:760px;margin:0 auto;padding:18px 14px 34px}.top{display:flex;align-items:end;justify-content:space-between;gap:16px;margin-bottom:14px}.eyebrow{font-size:12px;letter-spacing:.12em;color:#6b7280;font-weight:700}.title{margin:2px 0 0;font-size:28px}.pill{font-size:12px;background:#e5e7eb;border-radius:999px;padding:7px 10px;color:#374151}.pill.live{background:#dcfce7;color:#166534}.stats{display:grid;grid-template-columns:repeat(4,1fr);gap:8px;margin-bottom:10px}.stat{background:#fff;border:1px solid #e5e7eb;border-radius:14px;padding:12px 10px;min-width:0}.label{font-size:11px;color:#6b7280;margin-bottom:5px}.value{font-size:20px;font-weight:750;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.unit{font-size:11px;font-weight:600;color:#6b7280;margin-left:2px}#map{height:390px;background:#e5e7eb;border:1px solid #d1d5db;border-radius:18px;overflow:hidden}.controls{display:grid;grid-template-columns:1.3fr 1fr 1fr 1fr;gap:8px;margin:10px 0}.controls button{border:0;border-radius:13px;min-height:48px;font-size:15px;font-weight:700;padding:0 10px;cursor:pointer}.primary{background:#111827;color:white}.danger{background:#fee2e2;color:#991b1b}.secondary{background:#e5e7eb;color:#1f2937}.controls button:disabled{opacity:.45;cursor:not-allowed}.panel{background:#fff;border:1px solid #e5e7eb;border-radius:16px;padding:14px;margin-top:10px}.panel-head{display:flex;justify-content:space-between;gap:12px;align-items:center;margin-bottom:10px}.panel h2{font-size:15px;margin:0}.muted{font-size:12px;color:#6b7280}.status{font-size:13px;line-height:1.55;color:#374151}.status strong{color:#111827}canvas{width:100%;height:150px;display:block}.note{font-size:12px;line-height:1.55;color:#6b7280;margin:12px 2px 0}.leaflet-control-attribution{font-size:9px!important}.live-dot{display:inline-block;width:8px;height:8px;border-radius:50%;background:#16a34a;margin-right:6px;vertical-align:1px;animation:pulse 1.2s ease-in-out infinite}@keyframes pulse{0%,100%{opacity:.35}50%{opacity:1}}@media(prefers-reduced-motion:reduce){.live-dot{animation:none}}@media(max-width:560px){.app{padding:14px 10px 28px}.stats{grid-template-columns:1fr 1fr}.value{font-size:22px}#map{height:330px}.controls{grid-template-columns:1fr 1fr}.top{align-items:center}.title{font-size:25px}}
+  </style>
+</head>
+<body>
+<main class="app">
+  <header class="top">
+    <div><div class="eyebrow">WEB GPS PROTOTYPE</div><h1 class="title">Run Trace</h1></div>
+    <div id="mode" class="pill">待機中</div>
+  </header>
+
+  <section class="stats" aria-label="走行データ">
+    <div class="stat"><div class="label">距離</div><div class="value"><span id="distance">0.00</span><span class="unit">km</span></div></div>
+    <div class="stat"><div class="label">時間</div><div id="time" class="value">00:00</div></div>
+    <div class="stat"><div class="label">現在標高</div><div class="value"><span id="altitude">—</span><span class="unit">m</span></div></div>
+    <div class="stat"><div class="label">GPS精度</div><div class="value"><span id="accuracy">—</span><span class="unit">m</span></div></div>
+  </section>
+
+  <div id="map" aria-label="走行ルート地図"></div>
+
+  <div class="controls">
+    <button id="start" class="primary">記録開始</button>
+    <button id="stop" class="danger" disabled>終了</button>
+    <button id="demo" class="secondary">デモ走行</button>
+    <button id="reset" class="secondary">リセット</button>
+  </div>
+
+  <section class="panel">
+    <div class="panel-head"><h2>標高</h2><span id="ascent" class="muted">累積上昇 0 m</span></div>
+    <canvas id="elevation" width="700" height="150" aria-label="距離ごとの標高グラフ"></canvas>
+  </section>
+
+  <section class="panel status" aria-live="polite">
+    <strong id="status-title">位置情報をまだ取得していません</strong><br>
+    <span id="status-text">「記録開始」を押すと、iPhoneの位置情報の許可を求めます。</span>
+  </section>
+
+  <p class="note">走行線はGPSの生座標をそのまま使わず、精度判定・異常ジャンプ除外・位置フィルタ・微小ブレ除去を通した補正後の位置をリアルタイム描画します。標高も異常値を除外して平滑化します。</p>
+</main>
+
+<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js" crossorigin=""></script>
+<script>
+(() => {
+  const $ = id => document.getElementById(id);
+  const startBtn=$('start'), stopBtn=$('stop'), demoBtn=$('demo'), resetBtn=$('reset');
+  const distanceEl=$('distance'), timeEl=$('time'), altitudeEl=$('altitude'), accuracyEl=$('accuracy');
+  const modeEl=$('mode'), ascentEl=$('ascent'), statusTitle=$('status-title'), statusText=$('status-text');
+  const canvas=$('elevation'), ctx=canvas.getContext('2d');
+
+  const GPS={startMaxAccuracy:35,maxAccuracy:55,maxRunSpeed:8.5,hardJumpMeters:30,warmupCount:3};
+  const map=L.map('map',{zoomControl:true}).setView([36.2048,138.2529],5);
+  L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png',{maxZoom:19,attribution:'&copy; OpenStreetMap contributors'}).addTo(map);
+  let line=L.polyline([],{color:'#111827',weight:5,opacity:.88,lineJoin:'round',lineCap:'round',smoothFactor:1.35}).addTo(map);
+  let currentMarker=null,startMarker=null;
+
+  let points=[],watchId=null,timerId=null,startAt=null,elapsedMs=0,totalMeters=0,totalAscent=0,isRunning=false,demoTimer=null;
+  let warmup=[],origin=null,kx=null,ky=null,filterT=null,rejectedFixes=0,lastRenderedT=null;
+  let altitudeState=null,lastGoodRawAlt=null,ascentBaseAlt=null;
+
+  const clamp=(v,min,max)=>Math.max(min,Math.min(max,v));
+  function median(values){const a=values.filter(Number.isFinite).slice().sort((x,y)=>x-y);if(!a.length)return null;const m=Math.floor(a.length/2);return a.length%2?a[m]:(a[m-1]+a[m])/2}
+  function setStatus(title,text){statusTitle.textContent=title;statusText.textContent=text}
+  function fmtTime(ms){const s=Math.floor(ms/1000),m=Math.floor(s/60),r=s%60,h=Math.floor(m/60);return h?`${String(h).padStart(2,'0')}:${String(m%60).padStart(2,'0')}:${String(r).padStart(2,'0')}`:`${String(m).padStart(2,'0')}:${String(r).padStart(2,'0')}`}
+  function hav(a,b){const R=6371000,toRad=x=>x*Math.PI/180;const dLat=toRad(b.lat-a.lat),dLon=toRad(b.lng-a.lng);const q=Math.sin(dLat/2)**2+Math.cos(toRad(a.lat))*Math.cos(toRad(b.lat))*Math.sin(dLon/2)**2;return 2*R*Math.atan2(Math.sqrt(q),Math.sqrt(1-q))}
+  function resizeCanvas(){const dpr=Math.min(window.devicePixelRatio||1,2),w=Math.max(280,canvas.clientWidth),h=150;canvas.width=Math.round(w*dpr);canvas.height=Math.round(h*dpr);ctx.setTransform(dpr,0,0,dpr,0,0);drawElevation()}
+  function drawElevation(){const w=canvas.clientWidth,h=150;ctx.clearRect(0,0,w,h);ctx.strokeStyle='#e5e7eb';ctx.lineWidth=1;for(let i=1;i<4;i++){const y=(h-22)*i/4;ctx.beginPath();ctx.moveTo(0,y);ctx.lineTo(w,y);ctx.stroke()}const valid=points.filter(p=>Number.isFinite(p.alt));if(valid.length<2){ctx.fillStyle='#6b7280';ctx.font='13px -apple-system,BlinkMacSystemFont,sans-serif';ctx.fillText('標高データが入るとここにグラフを表示します',10,78);return}let min=Math.min(...valid.map(p=>p.alt)),max=Math.max(...valid.map(p=>p.alt));if(max-min<4){max+=2;min-=2}const maxD=Math.max(valid.at(-1).dist,1);ctx.strokeStyle='#4b5563';ctx.lineWidth=2;ctx.beginPath();valid.forEach((p,i)=>{const x=10+(w-20)*(p.dist/maxD),y=8+(h-28)*(1-(p.alt-min)/(max-min));i?ctx.lineTo(x,y):ctx.moveTo(x,y)});ctx.stroke();ctx.fillStyle='#6b7280';ctx.font='11px -apple-system,BlinkMacSystemFont,sans-serif';ctx.fillText(`${Math.round(max)} m`,10,12);ctx.fillText(`${Math.round(min)} m`,10,h-5)}
+  function updateMetrics(){distanceEl.textContent=(totalMeters/1000).toFixed(2);timeEl.textContent=fmtTime(elapsedMs+(isRunning&&startAt?Date.now()-startAt:0));ascentEl.textContent=`累積上昇 ${Math.round(totalAscent)} m`;drawElevation()}
+
+  function newKalman(position,positionVariance){return{p:position,v:0,p00:positionVariance,p01:0,p10:0,p11:16}}
+  function kalmanStep(k,z,dt,measurementVariance,accelSigma){
+    const q=accelSigma*accelSigma,dt2=dt*dt,dt3=dt2*dt,dt4=dt2*dt2;
+    let p=k.p+k.v*dt,v=k.v;
+    let p00=k.p00+dt*(k.p01+k.p10)+dt2*k.p11+.25*dt4*q;
+    let p01=k.p01+dt*k.p11+.5*dt3*q;
+    let p10=k.p10+dt*k.p11+.5*dt3*q;
+    let p11=k.p11+dt2*q;
+    const s=p00+measurementVariance,k0=p00/s,k1=p10/s,innovation=z-p;
+    k.p=p+k0*innovation;k.v=v+k1*innovation;
+    const n00=(1-k0)*p00,n01=(1-k0)*p01,n10=p10-k1*p00,n11=p11-k1*p01,sym=(n01+n10)/2;
+    k.p00=Math.max(n00,.01);k.p01=sym;k.p10=sym;k.p11=Math.max(n11,.01);
+  }
+  function localMeters(lat,lng){const y=(lat-origin.lat)*111132,x=(lng-origin.lng)*111320*Math.cos(origin.lat*Math.PI/180);return{x,y}}
+  function localLatLng(x,y){return{lat:origin.lat+y/111132,lng:origin.lng+x/(111320*Math.cos(origin.lat*Math.PI/180))}}
+
+  function filterAltitude(rawAlt,altAcc,t){
+    if(!Number.isFinite(rawAlt))return altitudeState?altitudeState.p:null;
+    if(Number.isFinite(altAcc)&&altAcc>40)return altitudeState?altitudeState.p:null;
+    if(lastGoodRawAlt){const dt=Math.max((t-lastGoodRawAlt.t)/1000,.5),delta=Math.abs(rawAlt-lastGoodRawAlt.alt);if(delta>12&&delta/dt>2.5)return altitudeState?altitudeState.p:null}
+    lastGoodRawAlt={alt:rawAlt,t};
+    const r=Math.max(25,Math.pow(Number.isFinite(altAcc)?altAcc:12,2));
+    if(!altitudeState){altitudeState={p:rawAlt,var:r,t};return rawAlt}
+    const dt=clamp((t-altitudeState.t)/1000,.2,10);altitudeState.var+=2.25*dt*dt;
+    const gain=altitudeState.var/(altitudeState.var+r);altitudeState.p+=gain*(rawAlt-altitudeState.p);altitudeState.var=Math.max((1-gain)*altitudeState.var,1);altitudeState.t=t;return altitudeState.p;
+  }
+
+  function initializeGpsFilter(){
+    const lat=median(warmup.map(p=>p.lat)),lng=median(warmup.map(p=>p.lng)),acc=median(warmup.map(p=>p.acc));
+    const latest=warmup.at(-1),alt=median(warmup.map(p=>p.alt)),altAcc=median(warmup.map(p=>p.altAcc));
+    origin={lat,lng};const posVar=Math.max(16,acc*acc);kx=newKalman(0,posVar);ky=newKalman(0,posVar);filterT=latest.t;
+    const filteredAlt=filterAltitude(alt,altAcc,latest.t);const p={lat,lng,alt:filteredAlt,acc,t:latest.t};warmup=[];return p;
+  }
+
+  function filterGps(raw){
+    if(!origin)return null;
+    const prev=points.at(-1),dt=clamp((raw.t-filterT)/1000,.2,10);
+    if(prev){const rawDistance=hav(prev,raw),allowance=Math.max(GPS.hardJumpMeters,raw.acc*2+(prev.acc||0));if(rawDistance>allowance&&rawDistance/dt>GPS.maxRunSpeed){rejectedFixes++;return null}}
+    const local=localMeters(raw.lat,raw.lng),r=Math.max(9,raw.acc*raw.acc),accelSigma=Number.isFinite(raw.speed)&&raw.speed>2.5?3:2;
+    kalmanStep(kx,local.x,dt,r,accelSigma);kalmanStep(ky,local.y,dt,r,accelSigma);filterT=raw.t;
+    const ll=localLatLng(kx.p,ky.p);return{lat:ll.lat,lng:ll.lng,alt:filterAltitude(raw.alt,raw.altAcc,raw.t),acc:raw.acc,t:raw.t};
+  }
+
+  function updateCurrentMarker(p,follow=true){
+    if(currentMarker)currentMarker.setLatLng([p.lat,p.lng]);else currentMarker=L.circleMarker([p.lat,p.lng],{radius:8,color:'#fff',fillColor:'#16a34a',fillOpacity:1,weight:3}).addTo(map);
+    if(follow){if(points.length===0)map.setView([p.lat,p.lng],18);else map.panTo([p.lat,p.lng],{animate:true,duration:.25,easeLinearity:.25})}
+    altitudeEl.textContent=Number.isFinite(p.alt)?Math.round(p.alt):'—';accuracyEl.textContent=Number.isFinite(p.acc)?Math.round(p.acc):'—';
+  }
+
+  function appendPoint(p,follow=true){
+    const prev=points.at(-1),seg=prev?hav(prev,p):0;totalMeters+=seg;p.dist=totalMeters;points.push(p);lastRenderedT=p.t;
+    if(Number.isFinite(p.alt)){if(ascentBaseAlt===null)ascentBaseAlt=p.alt;if(p.alt<ascentBaseAlt)ascentBaseAlt=p.alt;else if(p.alt-ascentBaseAlt>=3){totalAscent+=p.alt-ascentBaseAlt;ascentBaseAlt=p.alt}}
+    line.addLatLng([p.lat,p.lng]);if(!startMarker)startMarker=L.circleMarker([p.lat,p.lng],{radius:6,color:'#111827',fillColor:'#fff',fillOpacity:1,weight:3}).addTo(map);
+    updateCurrentMarker(p,follow);requestAnimationFrame(updateMetrics);
+  }
+
+  function handleGpsPosition(pos){
+    const c=pos.coords,acc=Number.isFinite(c.accuracy)?c.accuracy:999;accuracyEl.textContent=Math.round(acc);
+    const raw={lat:c.latitude,lng:c.longitude,alt:c.altitude,altAcc:c.altitudeAccuracy,acc,t:pos.timestamp,speed:c.speed};
+    if(!origin){
+      if(acc>GPS.startMaxAccuracy){setStatus('GPSを安定させています',`開始位置の精度が約 ${Math.round(acc)} m。35 m以内になるまで待っています。`);return}
+      warmup.push(raw);if(warmup.length>GPS.warmupCount)warmup.shift();setStatus('GPSを安定させています',`良好な測位を収集中 ${warmup.length}/${GPS.warmupCount}`);
+      if(warmup.length<GPS.warmupCount)return;const first=initializeGpsFilter();appendPoint(first,true);setStatus('補正してリアルタイム記録中','開始位置を安定化しました。以降はGPSノイズを除去して描画します。');return;
+    }
+    if(acc>GPS.maxAccuracy){rejectedFixes++;setStatus('精度の悪い測位を除外',`現在の精度は約 ${Math.round(acc)} m。55 mを超えたため走行線には使いません。`);return}
+    const filtered=filterGps(raw);if(!filtered){setStatus('GPSジャンプを除外',`不自然な瞬間移動を検出して無視しました。除外 ${rejectedFixes} 回。`);return}
+    updateCurrentMarker(filtered,true);
+    const prev=points.at(-1),move=prev?hav(prev,filtered):Infinity,deadband=clamp(acc*.08,1.2,3),age=lastRenderedT===null?Infinity:filtered.t-lastRenderedT;
+    if(!prev||move>=deadband||(age>5000&&move>=.5))appendPoint(filtered,false);else requestAnimationFrame(updateMetrics);
+    setStatus('補正してリアルタイム記録中',`${points.length} 地点を描画。微小ブレと異常値を自動除外しています${rejectedFixes?`（除外 ${rejectedFixes} 回）`:''}。`);
+  }
+
+  function tick(){updateMetrics()}
+  function startTimer(){startAt=Date.now();timerId=setInterval(tick,250)}
+  function stopTimer(){if(timerId)clearInterval(timerId);timerId=null;if(startAt){elapsedMs+=Date.now()-startAt;startAt=null}updateMetrics()}
+  function setRunning(v,label){isRunning=v;startBtn.disabled=v;stopBtn.disabled=!v;demoBtn.disabled=v;modeEl.textContent=label||(v?'記録中':'待機中');modeEl.classList.toggle('live',v);if(v)modeEl.innerHTML='<span class="live-dot"></span>'+(label||'記録中')}
+
+  function startReal(){
+    if(!navigator.geolocation){setStatus('このブラウザではGPSを使えません','Geolocation APIに対応したSafari/Chromeで開いてください。');return}
+    reset(false);setRunning(true,'GPS補正 LIVE');setStatus('位置情報を取得中','最初に良好なGPSを3回取得してから記録を開始します。');startTimer();
+    watchId=navigator.geolocation.watchPosition(handleGpsPosition,err=>{setStatus('位置情報を取得できません',err.code===1?'Safariの位置情報許可を確認してください。':err.message);stop()},{enableHighAccuracy:true,maximumAge:0,timeout:15000});
+  }
+
+  function stop(){if(watchId!==null)navigator.geolocation.clearWatch(watchId);watchId=null;if(demoTimer)clearInterval(demoTimer);demoTimer=null;stopTimer();setRunning(false,'完了');if(points.length>1)map.fitBounds(line.getBounds(),{padding:[28,28]});setStatus(points.length?'記録を終了しました':'記録データはありません',points.length?`${points.length} 地点・${(totalMeters/1000).toFixed(2)} km を記録しました。GPS異常値は ${rejectedFixes} 回除外しました。`:'位置情報を取得する前に終了しました。')}
+
+  function reset(update=true){
+    if(watchId!==null)navigator.geolocation.clearWatch(watchId);watchId=null;if(timerId)clearInterval(timerId);timerId=null;if(demoTimer)clearInterval(demoTimer);demoTimer=null;
+    points=[];startAt=null;elapsedMs=0;totalMeters=0;totalAscent=0;isRunning=false;warmup=[];origin=null;kx=null;ky=null;filterT=null;rejectedFixes=0;lastRenderedT=null;altitudeState=null;lastGoodRawAlt=null;ascentBaseAlt=null;
+    line.setLatLngs([]);if(currentMarker){map.removeLayer(currentMarker);currentMarker=null}if(startMarker){map.removeLayer(startMarker);startMarker=null}
+    distanceEl.textContent='0.00';timeEl.textContent='00:00';altitudeEl.textContent='—';accuracyEl.textContent='—';ascentEl.textContent='累積上昇 0 m';setRunning(false,'待機中');drawElevation();
+    if(update)setStatus('リセットしました','「記録開始」でGPS補正付き実走、「デモ走行」でサンプルを試せます。');
+  }
+
+  function demo(){
+    reset(false);setRunning(true,'LIVE DEMO');setStatus('デモ走行中','滑らかなサンプルルートをリアルタイム描画しています。');startTimer();
+    const base=[35.6812,139.7671],samples=42;let i=0;
+    demoTimer=setInterval(()=>{const a=i/samples*Math.PI*2;appendPoint({lat:base[0]+.004*Math.sin(a)*.72,lng:base[1]+.005*Math.cos(a),alt:26+10*Math.sin(a*1.5)+i*.18,acc:5,t:Date.now()},true);i++;if(i>samples)stop()},250);
+  }
+
+  startBtn.addEventListener('click',startReal);stopBtn.addEventListener('click',stop);demoBtn.addEventListener('click',demo);resetBtn.addEventListener('click',()=>reset(true));window.addEventListener('resize',resizeCanvas);resizeCanvas();
+})();
+</script>
+</body>
+</html>
